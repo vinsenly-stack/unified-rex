@@ -1,0 +1,102 @@
+name: Hyperliquid wallet analysis
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch and analyze Hyperliquid portfolio
+        shell: python
+        run: |
+          import json, urllib.request, csv, math
+          from datetime import datetime, timezone
+          from collections import defaultdict
+
+          address = "0x8bae3527e5a33fa0cf184f37bc112d071463ab6d"
+          req = urllib.request.Request(
+              "https://api.hyperliquid.xyz/info",
+              data=json.dumps({"type":"portfolio","user":address}).encode(),
+              headers={"Content-Type":"application/json"},
+              method="POST",
+          )
+          with urllib.request.urlopen(req, timeout=30) as r:
+              data = json.load(r)
+
+          with open("hyperliquid_portfolio.json","w") as f:
+              json.dump(data,f,indent=2)
+
+          # portfolio payload is a list of [period, object]
+          sections = {k:v for k,v in data}
+          sec = sections.get("allTime") or sections.get("perpAllTime")
+          if not sec:
+              raise RuntimeError("No allTime/perpAllTime section in portfolio response")
+
+          av = sec.get("accountValueHistory", [])
+          pnl = sec.get("pnlHistory", [])
+          if not av:
+              raise RuntimeError("No accountValueHistory returned")
+
+          pts = [(int(t), float(v)) for t,v in av if float(v) > 0]
+          pts.sort()
+          by_month = defaultdict(list)
+          for t,v in pts:
+              dt = datetime.fromtimestamp(t/1000, tz=timezone.utc)
+              by_month[dt.strftime("%Y-%m")].append((t,v))
+
+          rows=[]
+          for month in sorted(by_month):
+              arr=by_month[month]
+              start=arr[0][1]
+              end=arr[-1][1]
+              ret=(end/start-1)*100 if start else float("nan")
+              peak=arr[0][1]
+              mdd=0.0
+              for _,v in arr:
+                  peak=max(peak,v)
+                  dd=(v/peak-1)*100
+                  mdd=min(mdd,dd)
+              rows.append([month,start,end,ret,mdd])
+
+          with open("monthly_returns.csv","w",newline="") as f:
+              w=csv.writer(f)
+              w.writerow(["month_utc","start_account_value","end_account_value","net_return_pct","max_drawdown_pct"])
+              w.writerows(rows)
+
+          # overall sampled account-value DD
+          peak=pts[0][1]
+          overall_dd=0.0
+          for _,v in pts:
+              peak=max(peak,v)
+              overall_dd=min(overall_dd,(v/peak-1)*100)
+
+          summary={
+              "address": address,
+              "first_ts_utc": datetime.fromtimestamp(pts[0][0]/1000,tz=timezone.utc).isoformat(),
+              "last_ts_utc": datetime.fromtimestamp(pts[-1][0]/1000,tz=timezone.utc).isoformat(),
+              "first_account_value": pts[0][1],
+              "last_account_value": pts[-1][1],
+              "sampled_account_value_return_pct": (pts[-1][1]/pts[0][1]-1)*100,
+              "sampled_max_drawdown_pct": overall_dd,
+              "months": len(rows),
+          }
+          with open("summary.json","w") as f:
+              json.dump(summary,f,indent=2)
+
+          print("SUMMARY_JSON")
+          print(json.dumps(summary))
+          print("MONTHLY_CSV")
+          print(open("monthly_returns.csv").read())
+
+      - name: Upload analysis artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: hyperliquid-analysis
+          path: |
+            hyperliquid_portfolio.json
+            monthly_returns.csv
+            summary.json
