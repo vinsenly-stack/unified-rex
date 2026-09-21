@@ -2,7 +2,7 @@ name: Hyperliquid wallet analysis
 
 on:
   push:
-    branches: [main]
+    branches: [tmp-hyperliquid-analysis]
   workflow_dispatch:
 
 jobs:
@@ -13,7 +13,7 @@ jobs:
       - name: Fetch and analyze Hyperliquid portfolio
         shell: python
         run: |
-          import json, urllib.request, csv, math
+          import json, urllib.request, csv
           from datetime import datetime, timezone
           from collections import defaultdict
 
@@ -27,76 +27,79 @@ jobs:
           with urllib.request.urlopen(req, timeout=30) as r:
               data = json.load(r)
 
-          with open("hyperliquid_portfolio.json","w") as f:
-              json.dump(data,f,indent=2)
-
-          # portfolio payload is a list of [period, object]
           sections = {k:v for k,v in data}
           sec = sections.get("allTime") or sections.get("perpAllTime")
           if not sec:
-              raise RuntimeError("No allTime/perpAllTime section in portfolio response")
+              raise RuntimeError("No allTime/perpAllTime section")
+          av = sorted((int(t), float(v)) for t,v in sec.get("accountValueHistory", []))
+          pnl = sorted((int(t), float(v)) for t,v in sec.get("pnlHistory", []))
+          if not av or not pnl:
+              raise RuntimeError("Missing account value or pnl history")
 
-          av = sec.get("accountValueHistory", [])
-          pnl = sec.get("pnlHistory", [])
-          if not av:
-              raise RuntimeError("No accountValueHistory returned")
+          avmap = dict(av)
+          # align by index/timestamp order as API histories are sampled together
+          n=min(len(av),len(pnl))
+          av=av[-n:]; pnl=pnl[-n:]
+          series=[]
+          for (ta,a),(tp,p) in zip(av,pnl):
+              t=max(ta,tp)
+              series.append((t,a,p))
 
-          pts = [(int(t), float(v)) for t,v in av if float(v) > 0]
-          pts.sort()
-          by_month = defaultdict(list)
-          for t,v in pts:
-              dt = datetime.fromtimestamp(t/1000, tz=timezone.utc)
-              by_month[dt.strftime("%Y-%m")].append((t,v))
+          by_month=defaultdict(list)
+          for row in series:
+              dt=datetime.fromtimestamp(row[0]/1000,tz=timezone.utc)
+              by_month[dt.strftime("%Y-%m")].append(row)
 
           rows=[]
-          for month in sorted(by_month):
-              arr=by_month[month]
-              start=arr[0][1]
-              end=arr[-1][1]
-              ret=(end/start-1)*100 if start else float("nan")
-              peak=arr[0][1]
-              mdd=0.0
-              for _,v in arr:
-                  peak=max(peak,v)
-                  dd=(v/peak-1)*100
-                  mdd=min(mdd,dd)
-              rows.append([month,start,end,ret,mdd])
+          for m in sorted(by_month):
+              arr=by_month[m]
+              t0,a0,p0=arr[0]
+              t1,a1,p1=arr[-1]
+              month_pnl=p1-p0
+              # Trading return using beginning account value as denominator.
+              ret=month_pnl/a0*100 if a0 else float("nan")
+              # Cash-flow-adjusted equity index: base + pnl change during month.
+              eq=[a0 + (p-p0) for _,_,p in arr]
+              peak=eq[0]; mdd=0.0
+              for e in eq:
+                  peak=max(peak,e)
+                  mdd=min(mdd,(e/peak-1)*100)
+              rows.append([m,a0,a1,month_pnl,ret,mdd])
 
-          with open("monthly_returns.csv","w",newline="") as f:
+          with open("monthly_pnl_adjusted.csv","w",newline="") as f:
               w=csv.writer(f)
-              w.writerow(["month_utc","start_account_value","end_account_value","net_return_pct","max_drawdown_pct"])
+              w.writerow(["month_utc","start_account_value","end_account_value","trading_pnl","trading_return_pct","cashflow_adjusted_max_dd_pct"])
               w.writerows(rows)
 
-          # overall sampled account-value DD
-          peak=pts[0][1]
-          overall_dd=0.0
-          for _,v in pts:
-              peak=max(peak,v)
-              overall_dd=min(overall_dd,(v/peak-1)*100)
-
+          # Overall cash-flow-adjusted cumulative equity based on first account value + cumulative pnl delta.
+          base_a=series[0][1]; base_p=series[0][2]
+          eq=[base_a+(p-base_p) for _,_,p in series]
+          peak=eq[0]; overall_dd=0.0
+          for e in eq:
+              peak=max(peak,e)
+              overall_dd=min(overall_dd,(e/peak-1)*100)
+          total_pnl=series[-1][2]-base_p
           summary={
-              "address": address,
-              "first_ts_utc": datetime.fromtimestamp(pts[0][0]/1000,tz=timezone.utc).isoformat(),
-              "last_ts_utc": datetime.fromtimestamp(pts[-1][0]/1000,tz=timezone.utc).isoformat(),
-              "first_account_value": pts[0][1],
-              "last_account_value": pts[-1][1],
-              "sampled_account_value_return_pct": (pts[-1][1]/pts[0][1]-1)*100,
-              "sampled_max_drawdown_pct": overall_dd,
-              "months": len(rows),
+            "first_ts_utc":datetime.fromtimestamp(series[0][0]/1000,tz=timezone.utc).isoformat(),
+            "last_ts_utc":datetime.fromtimestamp(series[-1][0]/1000,tz=timezone.utc).isoformat(),
+            "start_account_value":base_a,
+            "end_account_value":series[-1][1],
+            "total_pnl_change":total_pnl,
+            "pnl_return_on_initial_equity_pct":total_pnl/base_a*100,
+            "cashflow_adjusted_sampled_max_dd_pct":overall_dd,
+            "months":len(rows)
           }
-          with open("summary.json","w") as f:
-              json.dump(summary,f,indent=2)
-
           print("SUMMARY_JSON")
           print(json.dumps(summary))
           print("MONTHLY_CSV")
-          print(open("monthly_returns.csv").read())
+          print(open("monthly_pnl_adjusted.csv").read())
+          with open("summary.json","w") as f: json.dump(summary,f,indent=2)
+          with open("hyperliquid_portfolio.json","w") as f: json.dump(data,f,indent=2)
 
-      - name: Upload analysis artifact
-        uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v4
         with:
           name: hyperliquid-analysis
           path: |
             hyperliquid_portfolio.json
-            monthly_returns.csv
+            monthly_pnl_adjusted.csv
             summary.json
