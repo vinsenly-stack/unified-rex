@@ -1,4 +1,4 @@
-import json, urllib.request, csv, math, statistics
+import json, urllib.request, csv, statistics
 from collections import defaultdict
 from datetime import datetime, timezone
 
@@ -13,9 +13,14 @@ def post(payload):
 def ms(s):
     return int(datetime.fromisoformat(s.replace("Z","+00:00")).timestamp()*1000)
 
+def iso(t):
+    return datetime.fromtimestamp(t/1000,tz=timezone.utc).isoformat()
+
+def month(t):
+    return datetime.fromtimestamp(t/1000,tz=timezone.utc).strftime("%Y-%m")
+
 def fetch_fills(start,end,aggregate=True):
-    out=[]
-    cur=start
+    out=[]; cur=start
     while cur<=end:
         page=post({"type":"userFillsByTime","user":ADDRESS,"startTime":cur,"endTime":end,"aggregateByTime":aggregate})
         if not page: break
@@ -24,141 +29,146 @@ def fetch_fills(start,end,aggregate=True):
         if len(page)<2000 or last>=end: break
         cur=last+1
         if len(out)>12000: break
-    # dedupe tids/hashes if possible
     seen=set(); ded=[]
     for x in sorted(out,key=lambda z:(int(z["time"]),str(z.get("tid","")),str(z.get("oid","")))):
         k=(x.get("tid"),x.get("hash"),x.get("oid"),x.get("time"),x.get("px"),x.get("sz"))
-        if k in seen: continue
-        seen.add(k); ded.append(x)
+        if k not in seen:
+            seen.add(k); ded.append(x)
     return ded
 
 portfolio=post({"type":"portfolio","user":ADDRESS})
-sections={k:v for k,v in portfolio}
-sec=sections.get("allTime") or sections.get("perpAllTime")
+sec=dict(portfolio).get("allTime") or dict(portfolio).get("perpAllTime")
 av=sorted((int(t),float(v)) for t,v in sec["accountValueHistory"])
 
 def account_value_at(t):
-    # nearest prior sample
     lo=0; hi=len(av)-1; ans=av[0][1]
     while lo<=hi:
         mid=(lo+hi)//2
-        if av[mid][0]<=t:
-            ans=av[mid][1]; lo=mid+1
+        if av[mid][0]<=t: ans=av[mid][1]; lo=mid+1
         else: hi=mid-1
     return ans
 
-windows=[
- ("2025-10","2025-10-01T00:00:00Z","2025-10-31T23:59:59Z"),
- ("2025-11","2025-11-01T00:00:00Z","2025-11-30T23:59:59Z"),
- ("2025-12","2025-12-01T00:00:00Z","2025-12-31T23:59:59Z"),
- ("2026-03","2026-03-01T00:00:00Z","2026-03-31T23:59:59Z"),
- ("2026-04","2026-04-01T00:00:00Z","2026-04-30T23:59:59Z"),
- ("2026-08","2026-08-01T00:00:00Z","2026-08-31T23:59:59Z"),
- ("2026-09","2026-09-01T00:00:00Z","2026-09-21T23:59:59Z"),
-]
-all_rows=[]
-coverage=[]
-for label,s,e in windows:
-    fills=fetch_fills(ms(s),ms(e),True)
-    coverage.append([label,len(fills), min([int(x["time"]) for x in fills],default=None), max([int(x["time"]) for x in fills],default=None)])
-    for x in fills:
-        x=dict(x); x["_window"]=label; all_rows.append(x)
+fills=fetch_fills(ms("2025-01-01T00:00:00Z"),ms("2026-09-21T23:59:59Z"),True)
 
-# Also query last 10k horizon to determine oldest retained fill.
-recent=fetch_fills(ms("2025-01-01T00:00:00Z"),ms("2026-09-21T23:59:59Z"),True)
-oldest=min([int(x["time"]) for x in recent],default=None)
-newest=max([int(x["time"]) for x in recent],default=None)
-
-# Reconstruct position episodes from retained fills.
-# startPosition is authoritative pre-fill position. signed fill = +sz for buy, -sz for sell.
-episodes=[]
-active={}
-fills_sorted=sorted(all_rows,key=lambda x:int(x["time"]))
-for x in fills_sorted:
+# Reconstruct complete flat-to-flat episodes only.
+episodes=[]; active={}; skip_until_flat=set()
+for x in sorted(fills,key=lambda z:int(z["time"])):
     coin=x["coin"]; t=int(x["time"]); px=float(x["px"]); sz=float(x["sz"])
     sp=float(x.get("startPosition","0") or 0)
     signed=sz if x.get("side")=="B" else -sz
-    ep=active.get(coin)
-    # New episode if position before fill is flat or active missing/inconsistent.
-    if abs(sp)<1e-12 or ep is None:
-        ep={"coin":coin,"start":t,"end":t,"entry_side":"LONG" if signed>0 else "SHORT",
-            "fills":[],"fees":0.0,"closed_pnl":0.0,"max_abs_pos":0.0,"max_notional":0.0,
-            "maker":0,"taker":0,"twap":0}
-        active[coin]=ep
+    pa=sp+signed
+
+    if coin in skip_until_flat:
+        if abs(pa)<1e-10: skip_until_flat.remove(coin)
+        continue
+
+    if coin not in active:
+        if abs(sp)>=1e-10:
+            # episode started before retained tape
+            if abs(pa)>=1e-10: skip_until_flat.add(coin)
+            continue
+        active[coin]={
+            "coin":coin,"start":t,"end":t,"entry_side":"LONG" if signed>0 else "SHORT",
+            "fills":[],"closed_pnl":0.0,"fees":0.0,"max_notional":0.0,
+            "maker":0,"taker":0,"adds":0,"reductions":0,"proof_adds":0,"pullback_adds":0,
+            "entry_px":px,"initial_notional":abs(pa)*px,"peak_pos_time":t
+        }
+
+    ep=active[coin]
+    before=abs(sp); after=abs(pa)
+    if after>before+1e-12:
+        ep["adds"]+=1
+        favorable=(px>ep["entry_px"]) if ep["entry_side"]=="LONG" else (px<ep["entry_px"])
+        if favorable: ep["proof_adds"]+=1
+        else: ep["pullback_adds"]+=1
+    elif after<before-1e-12:
+        ep["reductions"]+=1
+
     ep["fills"].append(x); ep["end"]=t
-    ep["fees"]+=float(x.get("fee","0") or 0)
     ep["closed_pnl"]+=float(x.get("closedPnl","0") or 0)
-    if x.get("crossed"): ep["taker"]+=1
-    else: ep["maker"]+=1
-    if x.get("twapId") not in (None,"","null"): ep["twap"]+=1
-    pos_after=sp+signed
-    ep["max_abs_pos"]=max(ep["max_abs_pos"],abs(sp),abs(pos_after))
-    ep["max_notional"]=max(ep["max_notional"],abs(sp)*px,abs(pos_after)*px)
-    # episode closes when position after fill flat; reversal ends old episode and begins new would be rare.
-    if abs(pos_after)<1e-10:
+    ep["fees"]+=float(x.get("fee","0") or 0)
+    ep["maker"]+=0 if x.get("crossed") else 1
+    ep["taker"]+=1 if x.get("crossed") else 0
+    cur_notional=max(abs(sp)*px,abs(pa)*px)
+    if cur_notional>ep["max_notional"]:
+        ep["max_notional"]=cur_notional; ep["peak_pos_time"]=t
+
+    if abs(pa)<1e-10:
         episodes.append(ep); active.pop(coin,None)
 
-# Metrics by episode
-ep_rows=[]
+rows=[]
 for ep in episodes:
-    start=ep["start"]; end=ep["end"]; dur=(end-start)/3600000
-    av0=account_value_at(start)
-    roi=ep["closed_pnl"]/av0*100 if av0 else None
-    lev=ep["max_notional"]/av0 if av0 else None
-    ep_rows.append({
-        "coin":ep["coin"],"side":ep["entry_side"],"start":start,"end":end,"hours":dur,
-        "fills":len(ep["fills"]),"closed_pnl":ep["closed_pnl"],"fees":ep["fees"],
-        "pnl_pct_equity":roi,"max_notional":ep["max_notional"],"max_notional_equity_x":lev,
-        "maker_share":ep["maker"]/len(ep["fills"]) if ep["fills"] else None,
-        "twap_share":ep["twap"]/len(ep["fills"]) if ep["fills"] else None,
+    av0=account_value_at(ep["start"])
+    nf=len(ep["fills"])
+    rows.append({
+        "coin":ep["coin"],"side":ep["entry_side"],"start":ep["start"],"end":ep["end"],
+        "start_month":month(ep["start"]),"close_month":month(ep["end"]),
+        "hours":(ep["end"]-ep["start"])/3600000,"fills":nf,
+        "closed_pnl":ep["closed_pnl"],"fees":ep["fees"],
+        "pnl_pct_equity":ep["closed_pnl"]/av0*100 if av0 else None,
+        "initial_notional_equity_x":ep["initial_notional"]/av0 if av0 else None,
+        "max_notional_equity_x":ep["max_notional"]/av0 if av0 else None,
+        "scale_multiple":ep["max_notional"]/ep["initial_notional"] if ep["initial_notional"]>0 else None,
+        "maker_share":ep["maker"]/nf if nf else None,
+        "adds":ep["adds"],"reductions":ep["reductions"],
+        "proof_add_share":ep["proof_adds"]/ep["adds"] if ep["adds"] else None,
+        "pullback_add_share":ep["pullback_adds"]/ep["adds"] if ep["adds"] else None,
+        "peak_pos_hours":(ep["peak_pos_time"]-ep["start"])/3600000,
     })
 
-def dt(t):
-    return datetime.fromtimestamp(t/1000,tz=timezone.utc).isoformat() if t else ""
-
-# Save coverage
-with open("fill_coverage.csv","w",newline="") as f:
-    w=csv.writer(f); w.writerow(["window","fills","first_fill","last_fill"])
-    for label,n,a,b in coverage:w.writerow([label,n,dt(a),dt(b)])
-    w.writerow(["recent_retained_total",len(recent),dt(oldest),dt(newest)])
-
-with open("episodes.csv","w",newline="") as f:
-    fields=list(ep_rows[0].keys()) if ep_rows else ["coin"]
-    w=csv.DictWriter(f,fieldnames=fields); w.writeheader()
-    for r in ep_rows:
-        q=dict(r); q["start"]=dt(r["start"]); q["end"]=dt(r["end"]); w.writerow(q)
-
-# Summaries for fully closed episodes
-summary={}
-if ep_rows:
-    by_coin=defaultdict(list); by_month=defaultdict(list); by_side=defaultdict(list)
-    for r in ep_rows:
-        by_coin[r["coin"]].append(r)
-        by_month[datetime.fromtimestamp(r["start"]/1000,tz=timezone.utc).strftime("%Y-%m")].append(r)
-        by_side[r["side"]].append(r)
-    def agg(group):
-        n=len(group); pnls=[r["closed_pnl"] for r in group]
-        wins=sum(p>0 for p in pnls)
-        pos=sum(p for p in pnls if p>0); neg=-sum(p for p in pnls if p<0)
-        return {"episodes":n,"pnl":sum(pnls),"win_rate":wins/n if n else None,
-                "pf":pos/neg if neg>0 else None,
-                "median_hours":statistics.median([r["hours"] for r in group]) if n else None,
-                "median_leverage_x":statistics.median([r["max_notional_equity_x"] for r in group if r["max_notional_equity_x"] is not None]) if n else None,
-                "maker_share":sum(r["maker_share"] for r in group)/n if n else None}
-    summary={
-      "retained_fill_count":len(recent),
-      "oldest_retained_fill":dt(oldest),
-      "newest_retained_fill":dt(newest),
-      "closed_episodes":len(ep_rows),
-      "by_coin":{k:agg(v) for k,v in sorted(by_coin.items(),key=lambda kv:-sum(x["closed_pnl"] for x in kv[1]))},
-      "by_month":{k:agg(v) for k,v in sorted(by_month.items())},
-      "by_side":{k:agg(v) for k,v in by_side.items()},
-      "top_winners":sorted(ep_rows,key=lambda r:r["closed_pnl"],reverse=True)[:25],
-      "top_losers":sorted(ep_rows,key=lambda r:r["closed_pnl"])[:25],
+def agg(g):
+    if not g:return {}
+    pn=[x["closed_pnl"] for x in g]; pos=sum(x for x in pn if x>0); neg=-sum(x for x in pn if x<0)
+    lev=[x["max_notional_equity_x"] for x in g if x["max_notional_equity_x"] is not None]
+    scales=[x["scale_multiple"] for x in g if x["scale_multiple"] is not None]
+    return {
+      "episodes":len(g),"pnl":sum(pn),"win_rate":sum(x>0 for x in pn)/len(g),
+      "pf":pos/neg if neg>0 else None,
+      "median_hours":statistics.median(x["hours"] for x in g),
+      "median_max_notional_equity_x":statistics.median(lev) if lev else None,
+      "median_scale_multiple":statistics.median(scales) if scales else None,
+      "maker_share":sum(x["maker_share"] for x in g)/len(g),
+      "proof_add_share":sum((x["proof_add_share"] or 0)*x["adds"] for x in g)/sum(x["adds"] for x in g) if sum(x["adds"] for x in g) else None,
+      "pullback_add_share":sum((x["pullback_add_share"] or 0)*x["adds"] for x in g)/sum(x["adds"] for x in g) if sum(x["adds"] for x in g) else None,
     }
-with open("trade_forensics_summary.json","w") as f: json.dump(summary,f,indent=2,default=str)
 
-print("COVERAGE")
-print(open("fill_coverage.csv").read())
-print("SUMMARY")
-print(json.dumps(summary))
+by_close_month=defaultdict(list); by_start_month=defaultdict(list); by_coin=defaultdict(list); by_side=defaultdict(list)
+for r in rows:
+    by_close_month[r["close_month"]].append(r); by_start_month[r["start_month"]].append(r)
+    by_coin[r["coin"]].append(r); by_side[r["side"]].append(r)
+
+target_months={"2025-10","2025-11","2025-12","2026-03","2026-04","2026-08"}
+month_coin={}
+for m in sorted(target_months):
+    g=by_close_month.get(m,[])
+    bc=defaultdict(list)
+    for r in g:bc[r["coin"]].append(r)
+    month_coin[m]=[{**{"coin":c},**agg(v)} for c,v in sorted(bc.items(),key=lambda kv:-sum(x["closed_pnl"] for x in kv[1]))]
+
+top_by_month={}
+for m in sorted(target_months):
+    g=by_close_month.get(m,[])
+    top_by_month[m]=sorted(g,key=lambda x:x["closed_pnl"],reverse=True)[:10]
+
+out={
+ "retained_fill_count":len(fills),
+ "oldest_fill":iso(min(int(x["time"]) for x in fills)),
+ "newest_fill":iso(max(int(x["time"]) for x in fills)),
+ "complete_closed_episodes":len(rows),
+ "overall":agg(rows),
+ "by_side":{k:agg(v) for k,v in by_side.items()},
+ "by_close_month":{k:agg(v) for k,v in sorted(by_close_month.items())},
+ "month_coin":month_coin,
+ "top_by_month":top_by_month,
+ "top_winners":sorted(rows,key=lambda x:x["closed_pnl"],reverse=True)[:30],
+ "top_losers":sorted(rows,key=lambda x:x["closed_pnl"])[:20],
+}
+with open("trade_forensics_full.json","w") as f:json.dump(out,f,indent=2)
+with open("episodes_full.csv","w",newline="") as f:
+    if rows:
+        w=csv.DictWriter(f,fieldnames=list(rows[0].keys()));w.writeheader()
+        for r in rows:
+            q=dict(r);q["start"]=iso(r["start"]);q["end"]=iso(r["end"]);w.writerow(q)
+
+print("FORENSICS_FULL")
+print(json.dumps(out))
