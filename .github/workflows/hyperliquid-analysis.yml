@@ -14,6 +14,8 @@ jobs:
         run: python tools/hyperliquid_twr.py
       - name: Run trade-level forensics
         run: python tools/hyperliquid_trade_forensics.py
+      - name: Run entry-context analysis
+        run: python tools/hyperliquid_entry_context.py
       - uses: actions/upload-artifact@v4
         with:
           name: hyperliquid-analysis
@@ -21,6 +23,6 @@ jobs:
             hyperliquid_portfolio.json
             monthly_twr.csv
             summary_twr.json
-            fill_coverage.csv
-            episodes.csv
-            trade_forensics_summary.json
+            trade_forensics_full.json
+            episodes_full.csv
+            entry_context.json
