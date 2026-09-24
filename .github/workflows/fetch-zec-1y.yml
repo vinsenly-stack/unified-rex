@@ -1,0 +1,64 @@
+name: Fetch ZEC 1y 1m
+
+on:
+  push:
+    paths:
+      - '.github/workflows/fetch-zec-1y.yml'
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch Binance Vision ZECUSDT 1m
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p raw out
+          for m in 2025-08 2025-09 2025-10 2025-11 2025-12 2026-01 2026-02 2026-03 2026-04 2026-05 2026-06 2026-07 2026-08; do
+            url="https://data.binance.vision/data/futures/um/monthly/klines/ZECUSDT/1m/ZECUSDT-1m-$m.zip"
+            curl -fL --retry 3 "$url" -o "raw/$m.zip"
+            unzip -q "raw/$m.zip" -d raw
+          done
+          for d in $(seq -w 1 19); do
+            day="2026-09-$d"
+            url="https://data.binance.vision/data/futures/um/daily/klines/ZECUSDT/1m/ZECUSDT-1m-$day.zip"
+            curl -fL --retry 3 "$url" -o "raw/$day.zip"
+            unzip -q "raw/$day.zip" -d raw
+          done
+          python - <<'PY'
+          import csv,glob,hashlib,json,datetime
+          files=sorted(glob.glob('raw/ZECUSDT-1m-*.csv'))
+          header=['open_time','open','high','low','close','volume','close_time','quote_volume','trades','taker_buy_volume','taker_buy_quote','ignore']
+          rows=[]
+          for fn in files:
+              with open(fn,newline='') as f:
+                  r=csv.reader(f); first=next(r)
+                  if first and first[0].lower() not in ('open_time','open time'):
+                      rows.append(first)
+                  rows.extend(r)
+          start_ms=int(datetime.datetime(2025,8,20,tzinfo=datetime.timezone.utc).timestamp()*1000)
+          end_ms=int(datetime.datetime(2026,9,20,tzinfo=datetime.timezone.utc).timestamp()*1000)
+          rows=[r[:12] for r in rows if start_ms<=int(r[0])<end_ms]
+          rows.sort(key=lambda x:int(x[0]))
+          dedup=[];seen=set()
+          for row in rows:
+              t=int(row[0])
+              if t not in seen:
+                  seen.add(t);dedup.append(row)
+          out='out/ZECUSDT_1m_2025-08-20_to_2026-09-19.csv'
+          with open(out,'w',newline='') as f:
+              w=csv.writer(f);w.writerow(header);w.writerows(dedup)
+          times=[int(x[0]) for x in dedup]
+          gaps=sum(1 for a,b in zip(times,times[1:]) if b-a!=60000)
+          sha=hashlib.sha256(open(out,'rb').read()).hexdigest()
+          fmt=lambda ms: datetime.datetime.fromtimestamp(ms/1000,datetime.timezone.utc).isoformat()
+          meta={'rows':len(dedup),'start':fmt(times[0]),'end':fmt(times[-1]),'gaps':gaps,
+                'duplicates':len(rows)-len(dedup),'sha256':sha,'source':'Binance Vision USD-M monthly+daily archives'}
+          open('out/VALIDATION.json','w').write(json.dumps(meta,indent=2));print(json.dumps(meta,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zec-1y-1m-20250820-20260919
+          path: out/
+          if-no-files-found: error
