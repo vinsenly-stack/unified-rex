@@ -10,40 +10,45 @@ jobs:
   fetch:
     runs-on: ubuntu-latest
     steps:
-      - name: Install Python deps
-        run: python -m pip install --quiet pandas requests
-      - name: Fetch Binance USD-M ZECUSDT 1m
+      - name: Fetch Binance Vision ZECUSDT 1m
         shell: bash
         run: |
           set -euo pipefail
-          mkdir -p out
+          mkdir -p out raw
+          for d in 2026-09-20 2026-09-21 2026-09-22 2026-09-23 2026-09-24; do
+            url="https://data.binance.vision/data/futures/um/daily/klines/ZECUSDT/1m/ZECUSDT-1m-$d.zip"
+            curl -fL --retry 3 "$url" -o "raw/$d.zip"
+            unzip -q "raw/$d.zip" -d raw
+          done
           python - <<'PY'
-          import requests, pandas as pd, hashlib, json
-          symbol='ZECUSDT'; interval='1m'
-          start=pd.Timestamp('2026-09-20T00:00:00Z')
-          end=pd.Timestamp('2026-09-25T00:00:00Z')
+          import csv,glob,hashlib,json,datetime
+          files=sorted(glob.glob('raw/ZECUSDT-1m-2026-09-*.csv'))
+          header=['open_time','open','high','low','close','volume','close_time','quote_volume','trades','taker_buy_volume','taker_buy_quote','ignore']
           rows=[]
-          t=int(start.timestamp()*1000); end_ms=int(end.timestamp()*1000)
-          while t < end_ms:
-              r=requests.get('https://fapi.binance.com/fapi/v1/klines',
-                  params={'symbol':symbol,'interval':interval,'startTime':t,'endTime':end_ms-1,'limit':1500},
-                  timeout=30)
-              r.raise_for_status()
-              batch=r.json()
-              if not batch: break
-              rows.extend(batch)
-              t=int(batch[-1][0])+60000
-          cols=['open_time','open','high','low','close','volume','close_time','quote_volume','trades','taker_buy_volume','taker_buy_quote','ignore']
-          df=pd.DataFrame(rows,columns=cols)
-          df=df.drop_duplicates('open_time').sort_values('open_time')
-          df=df[(df.open_time>=int(start.timestamp()*1000))&(df.open_time<end_ms)]
-          df.to_csv('out/ZECUSDT_1m_2026-09-20_to_2026-09-24.csv',index=False)
-          times=df.open_time.astype('int64').to_numpy()
-          gaps=int(((times[1:]-times[:-1])!=60000).sum()) if len(times)>1 else 0
-          sha=hashlib.sha256(open('out/ZECUSDT_1m_2026-09-20_to_2026-09-24.csv','rb').read()).hexdigest()
-          meta={'rows':int(len(df)),'start':str(pd.to_datetime(df.open_time.iloc[0],unit='ms',utc=True)) if len(df) else None,
-                'end':str(pd.to_datetime(df.open_time.iloc[-1],unit='ms',utc=True)) if len(df) else None,
-                'gaps':gaps,'duplicates':int(df.open_time.duplicated().sum()),'sha256':sha}
+          for fn in files:
+              with open(fn,newline='') as f:
+                  r=csv.reader(f)
+                  first=next(r)
+                  if first and first[0].lower() in ('open_time','open time'):
+                      pass
+                  else:
+                      rows.append(first)
+                  rows.extend(r)
+          rows.sort(key=lambda x:int(x[0]))
+          dedup=[];seen=set()
+          for row in rows:
+              t=int(row[0])
+              if t not in seen:
+                  seen.add(t);dedup.append(row[:12])
+          out='out/ZECUSDT_1m_2026-09-20_to_2026-09-24.csv'
+          with open(out,'w',newline='') as f:
+              w=csv.writer(f);w.writerow(header);w.writerows(dedup)
+          times=[int(x[0]) for x in dedup]
+          gaps=sum(1 for a,b in zip(times,times[1:]) if b-a!=60000)
+          sha=hashlib.sha256(open(out,'rb').read()).hexdigest()
+          fmt=lambda ms: datetime.datetime.fromtimestamp(ms/1000,datetime.timezone.utc).isoformat()
+          meta={'rows':len(dedup),'start':fmt(times[0]) if times else None,'end':fmt(times[-1]) if times else None,
+                'gaps':gaps,'duplicates':len(rows)-len(dedup),'sha256':sha,'source':'Binance Vision USD-M daily archives'}
           open('out/VALIDATION.json','w').write(json.dumps(meta,indent=2))
           print(json.dumps(meta,indent=2))
           PY
