@@ -1,0 +1,79 @@
+name: Build Q10 warm inputs
+
+on:
+  push:
+    paths:
+      - '.github/workflows/build-q10-warm.yml'
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download Binance Vision warm history
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out raw
+          for sym in HYPEUSDT TAOUSDT UNIUSDT; do
+            mkdir -p "raw/$sym"
+            for ym in 2025-08 2025-09 2025-10 2025-11 2025-12 2026-01 2026-02 2026-03 2026-04 2026-05 2026-06 2026-07 2026-08; do
+              url="https://data.binance.vision/data/futures/um/monthly/klines/$sym/1m/$sym-1m-$ym.zip"
+              curl -fLsS --retry 3 "$url" -o "raw/$sym/$ym.zip"
+              unzip -q "raw/$sym/$ym.zip" -d "raw/$sym"
+            done
+            for d in $(seq -w 1 18); do
+              date="2026-09-$d"
+              url="https://data.binance.vision/data/futures/um/daily/klines/$sym/1m/$sym-1m-$date.zip"
+              curl -fLsS --retry 3 "$url" -o "raw/$sym/$date.zip"
+              unzip -q "raw/$sym/$date.zip" -d "raw/$sym"
+            done
+          done
+      - name: Assemble deterministic CSVs
+        shell: bash
+        run: |
+          python - <<'PY'
+          import csv, glob, hashlib, json, datetime
+          starts={
+            'HYPEUSDT': datetime.datetime(2025,8,26,tzinfo=datetime.timezone.utc),
+            'TAOUSDT': datetime.datetime(2025,8,27,tzinfo=datetime.timezone.utc),
+            'UNIUSDT': datetime.datetime(2025,9,1,tzinfo=datetime.timezone.utc),
+          }
+          end=datetime.datetime(2026,9,19,tzinfo=datetime.timezone.utc)
+          end_ms=int(end.timestamp()*1000)
+          header=['open_time','open','high','low','close','volume','close_time','quote_asset_volume','count','taker_buy_volume','taker_buy_quote_volume','ignore']
+          summary={}
+          for sym,start in starts.items():
+            rows=[]
+            for fn in sorted(glob.glob(f'raw/{sym}/{sym}-1m-*.csv')):
+              with open(fn,newline='') as fh:
+                rr=csv.reader(fh)
+                for row in rr:
+                  if not row or not row[0].isdigit(): continue
+                  t=int(row[0])
+                  if int(start.timestamp()*1000) <= t < end_ms:
+                    rows.append(row[:12])
+            rows.sort(key=lambda r:int(r[0]))
+            dedup=[];seen=set()
+            for row in rows:
+              t=int(row[0])
+              if t not in seen: seen.add(t);dedup.append(row)
+            out=f"out/{sym.replace('USDT','')}_warm.csv"
+            with open(out,'w',newline='') as fh:
+              w=csv.writer(fh);w.writerow(header);w.writerows(dedup)
+            ts=[int(r[0]) for r in dedup]
+            gaps=sum(1 for a,b in zip(ts,ts[1:]) if b-a!=60000)
+            summary[sym]={
+              'rows':len(dedup),'gaps':gaps,'duplicates':len(rows)-len(dedup),
+              'start':datetime.datetime.fromtimestamp(ts[0]/1000,datetime.timezone.utc).isoformat(),
+              'end':datetime.datetime.fromtimestamp(ts[-1]/1000,datetime.timezone.utc).isoformat(),
+              'sha256':hashlib.sha256(open(out,'rb').read()).hexdigest()
+            }
+          open('out/VALIDATION.json','w').write(json.dumps(summary,indent=2))
+          print(json.dumps(summary,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: q10-warm-inputs-20260919
+          path: out/
+          if-no-files-found: error
