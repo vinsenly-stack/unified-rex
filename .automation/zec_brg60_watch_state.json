@@ -1,0 +1,14 @@
+{
+  "symbol": "ZECUSDT",
+  "strategy": "ZEC_REX_v1.5_BRG_NOPROOF60_RC1_RESEARCH_20260923",
+  "control": "Certified ZEC v1.4",
+  "last_validated_1m_open_utc": "2026-09-25T03:02:00Z",
+  "last_validated_1m_close_utc": "2026-09-25T03:02:59.999Z",
+  "source": "Binance USD-M ZECUSDT 1m",
+  "rows_checked_since_prior_cutoff": 633,
+  "gaps": 0,
+  "duplicates": 0,
+  "new_raw_brg_candidates_after_2026_09_24T16_29Z": 0,
+  "brg60_activations": 0,
+  "decision": "NO_NOTIFICATION_KEEP_WATCHING"
+}
