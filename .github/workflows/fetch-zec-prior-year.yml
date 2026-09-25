@@ -1,0 +1,56 @@
+name: Fetch ZEC prior-year 1m
+
+on:
+  push:
+    paths:
+      - '.github/workflows/fetch-zec-prior-year.yml'
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch Binance Vision ZECUSDT prior-year 1m
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p raw out
+          for m in 2024-08 2024-09 2024-10 2024-11 2024-12 2025-01 2025-02 2025-03 2025-04 2025-05 2025-06 2025-07 2025-08; do
+            url="https://data.binance.vision/data/futures/um/monthly/klines/ZECUSDT/1m/ZECUSDT-1m-$m.zip"
+            curl -fL --retry 3 "$url" -o "raw/$m.zip"
+            unzip -q "raw/$m.zip" -d raw
+          done
+          for d in $(seq -w 1 19); do
+            day="2025-09-$d"
+            url="https://data.binance.vision/data/futures/um/daily/klines/ZECUSDT/1m/ZECUSDT-1m-$day.zip"
+            curl -fL --retry 3 "$url" -o "raw/$day.zip"
+            unzip -q "raw/$day.zip" -d raw
+          done
+          python - <<'PY'
+          import csv,glob,hashlib,json,datetime
+          files=sorted(glob.glob('raw/ZECUSDT-1m-*.csv')); rows=[]
+          for fn in files:
+              with open(fn,newline='') as f:
+                  r=csv.reader(f); first=next(r)
+                  if first and first[0].lower() not in ('open_time','open time'): rows.append(first)
+                  rows.extend(r)
+          start=int(datetime.datetime(2024,8,20,tzinfo=datetime.timezone.utc).timestamp()*1000)
+          end=int(datetime.datetime(2025,9,20,tzinfo=datetime.timezone.utc).timestamp()*1000)
+          rows=[r[:12] for r in rows if start<=int(r[0])<end]; rows.sort(key=lambda x:int(x[0]))
+          dedup=[];seen=set()
+          for row in rows:
+              t=int(row[0])
+              if t not in seen:seen.add(t);dedup.append(row)
+          out='out/ZECUSDT_1m_2024-08-20_to_2025-09-19.csv'
+          header=['open_time','open','high','low','close','volume','close_time','quote_volume','trades','taker_buy_volume','taker_buy_quote','ignore']
+          with open(out,'w',newline='') as f:w=csv.writer(f);w.writerow(header);w.writerows(dedup)
+          times=[int(x[0]) for x in dedup];gaps=sum(1 for a,b in zip(times,times[1:]) if b-a!=60000)
+          sha=hashlib.sha256(open(out,'rb').read()).hexdigest()
+          meta={'rows':len(dedup),'gaps':gaps,'duplicates':len(rows)-len(dedup),'sha256':sha}
+          open('out/VALIDATION.json','w').write(json.dumps(meta,indent=2));print(json.dumps(meta,indent=2))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: zec-prior-year-1m-20240820-20250919
+          path: out/
+          if-no-files-found: error
