@@ -1,0 +1,27 @@
+name: Fetch Binance extension
+on:
+  push:
+    branches: [tmp-hyperliquid-analysis]
+    paths:
+      - 'tools/fetch_binance_1m_extension.py'
+      - '.github/workflows/fetch-binance-extension.yml'
+permissions:
+  contents: write
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch exact 1m extension
+        run: python tools/fetch_binance_1m_extension.py
+      - name: Commit snapshot
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/binance_ext
+          if git diff --cached --quiet; then
+            echo "No changes"
+          else
+            git commit -m "Add Binance 1m Sep19-28 extension"
+            git push origin HEAD:tmp-hyperliquid-analysis
+          fi
