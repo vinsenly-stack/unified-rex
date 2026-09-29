@@ -1,4 +1,4 @@
-name: Fetch Binance extension
+name: Fetch Binance extension # package Sep28 connector
 on:
   push:
     branches: [tmp-hyperliquid-analysis]
