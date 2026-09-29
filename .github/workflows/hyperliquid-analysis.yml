@@ -10,6 +10,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Fetch v0.25 forward Binance data
+        run: python tools/fetch_v025_forward_data.py
       - name: Run cashflow-neutral analysis
         run: python tools/hyperliquid_twr.py
       - name: Run trade-level forensics
@@ -26,3 +28,4 @@ jobs:
             trade_forensics_full.json
             episodes_full.csv
             entry_context.json
+            forward_data/
