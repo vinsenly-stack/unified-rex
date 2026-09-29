@@ -14,6 +14,14 @@ jobs:
       - uses: actions/checkout@v4
       - name: Fetch exact 1m extension
         run: python tools/fetch_binance_1m_extension.py
+      - name: Upload bridge artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: v025-forward-data
+          path: |
+            data/binance_ext/
+            data/sep28_connector/
+          if-no-files-found: warn
       - name: Commit snapshot
         run: |
           git config user.name "github-actions[bot]"
@@ -22,6 +30,6 @@ jobs:
           if git diff --cached --quiet; then
             echo "No changes"
           else
-            git commit -m "Add Binance 1m Sep19-28 extension"
+            git commit -m "Add Binance 1m Sep19-27 extension"
             git push origin HEAD:tmp-hyperliquid-analysis
           fi
