@@ -14,7 +14,19 @@ try {
   exit 0
 }
 catch {
-  Write-Host "Daily archive unavailable; falling back to Binance Futures API for $Symbol $Date" -ForegroundColor Yellow
+  Write-Host "Daily archive unavailable for $Symbol $Date" -ForegroundColor Yellow
+}
+
+$repoFallback = Join-Path $PWD "tmp\sep30_1m\$Symbol-1m-$Date.csv"
+if (Test-Path $repoFallback) {
+  $lineCount = (Get-Content $repoFallback | Measure-Object -Line).Lines
+  if ($lineCount -ne 1440) {
+    throw "Expected 1440 rows in repo fallback for $Symbol $Date, got $lineCount"
+  }
+  if (Test-Path $OutFile) { Remove-Item $OutFile -Force }
+  Compress-Archive -Path $repoFallback -DestinationPath $OutFile -Force
+  Write-Host "Packaged repo fallback: $repoFallback -> $OutFile"
+  exit 0
 }
 
 $dt = [DateTimeOffset]::ParseExact(
