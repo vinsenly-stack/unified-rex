@@ -1,9 +1,9 @@
 name: temp-trava-sep30-data
 
 on:
-  pull_request:
+  push:
     branches:
-      - main
+      - tmp/trava-sep30-data-20261001
   workflow_dispatch:
 
 jobs:
