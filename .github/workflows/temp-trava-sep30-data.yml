@@ -4,6 +4,9 @@ on:
   push:
     branches:
       - tmp/trava-sep30-data-20261001
+  pull_request:
+    branches:
+      - main
   workflow_dispatch:
 
 jobs:
