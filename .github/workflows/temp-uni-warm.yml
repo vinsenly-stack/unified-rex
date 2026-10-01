@@ -1,0 +1,37 @@
+name: temp-uni-warm-data
+on:
+  push:
+    branches:
+      - tmp/uni-warm-20261001
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download UNI daily 1m archives
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p uni_warm
+          python - <<'PY'
+          import datetime, pathlib, urllib.request
+          out=pathlib.Path("uni_warm")
+          d=datetime.date(2026,8,12)
+          end=datetime.date(2026,9,18)
+          n=0
+          while d<=end:
+              name=f"UNIUSDT-1m-{d.isoformat()}.zip"
+              url=f"https://data.binance.vision/data/futures/um/daily/klines/UNIUSDT/1m/{name}"
+              print(url, flush=True)
+              urllib.request.urlretrieve(url, out/name)
+              n+=1
+              d+=datetime.timedelta(days=1)
+          print("files",n)
+          PY
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: UNI_WARM_2026-08-12_to_2026-09-18
+          path: uni_warm
+          retention-days: 1
