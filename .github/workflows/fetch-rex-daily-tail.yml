@@ -1,0 +1,116 @@
+name: Fetch REX daily 1m tail
+
+on:
+  push:
+    paths:
+      - '.github/workflows/fetch-rex-daily-tail.yml'
+  workflow_dispatch:
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Fetch validated Binance USD-M 1m tail
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python - <<'PY'
+          import csv, io, json, zipfile, hashlib, datetime as dt, time
+          from pathlib import Path
+          import requests
+
+          symbols = [
+              'HYPEUSDT','AAVEUSDT','TAOUSDT','UNIUSDT','PENDLEUSDT',
+              'APTUSDT','ONDOUSDT','AKEUSDT','USELESSUSDT','WLDUSDT'
+          ]
+          end_day = dt.datetime.now(dt.timezone.utc).date() - dt.timedelta(days=1)
+          start_day = end_day - dt.timedelta(days=20)
+          header = [
+              'open_time','open','high','low','close','volume','close_time',
+              'quote_asset_volume','count','taker_buy_volume',
+              'taker_buy_quote_volume','ignore'
+          ]
+          session = requests.Session()
+          session.headers.update({'User-Agent':'unified-rex-daily-monitor/1.0'})
+          validation = {}
+          expected = ((end_day - start_day).days + 1) * 1440
+
+          def rest_day(sym, day):
+              start = int(dt.datetime.combine(day, dt.time(0), tzinfo=dt.timezone.utc).timestamp()*1000)
+              end = int((dt.datetime.combine(day, dt.time(0), tzinfo=dt.timezone.utc)+dt.timedelta(days=1)).timestamp()*1000)-1
+              url='https://fapi.binance.com/fapi/v1/klines'
+              r=session.get(url, params={'symbol':sym,'interval':'1m','startTime':start,'endTime':end,'limit':1500}, timeout=30)
+              r.raise_for_status()
+              data=r.json()
+              return [[str(x) for x in row[:12]] for row in data]
+
+          for sym in symbols:
+              rows=[]
+              source_counts={'vision':0,'rest':0}
+              for i in range((end_day-start_day).days+1):
+                  day=start_day+dt.timedelta(days=i)
+                  ds=day.isoformat()
+                  url=f'https://data.binance.vision/data/futures/um/daily/klines/{sym}/1m/{sym}-1m-{ds}.zip'
+                  got=None
+                  for attempt in range(3):
+                      try:
+                          r=session.get(url, timeout=30)
+                          if r.status_code==200 and r.content[:2]==b'PK':
+                              z=zipfile.ZipFile(io.BytesIO(r.content))
+                              name=next(n for n in z.namelist() if n.endswith('.csv'))
+                              text=z.read(name).decode('utf-8')
+                              rr=list(csv.reader(io.StringIO(text)))
+                              got=[row[:12] for row in rr if row and row[0].isdigit()]
+                              source_counts['vision']+=1
+                              break
+                      except Exception:
+                          pass
+                      time.sleep(1+attempt)
+                  if got is None:
+                      got=rest_day(sym, day)
+                      source_counts['rest']+=1
+                  rows.extend(got)
+
+              rows.sort(key=lambda r:int(r[0]))
+              dedup=[]; seen=set(); duplicate_count=0
+              for row in rows:
+                  t=int(row[0])
+                  if t in seen:
+                      duplicate_count+=1
+                      continue
+                  seen.add(t); dedup.append(row)
+
+              first_ms=int(dt.datetime.combine(start_day,dt.time(0),tzinfo=dt.timezone.utc).timestamp()*1000)
+              last_ms=int(dt.datetime.combine(end_day,dt.time(23,59),tzinfo=dt.timezone.utc).timestamp()*1000)
+              dedup=[r for r in dedup if first_ms <= int(r[0]) <= last_ms]
+              ts=[int(r[0]) for r in dedup]
+              gaps=sum(1 for a,b in zip(ts,ts[1:]) if b-a != 60000)
+              if len(dedup) != expected or gaps or duplicate_count:
+                  raise RuntimeError(f'{sym} validation failed rows={len(dedup)}/{expected} gaps={gaps} dups={duplicate_count}')
+
+              out=Path('out')/f'{sym}_1m_{start_day}_to_{end_day}.csv'
+              with out.open('w',newline='') as fh:
+                  w=csv.writer(fh); w.writerow(header); w.writerows(dedup)
+              validation[sym]={
+                  'rows':len(dedup),'expected_rows':expected,
+                  'start':dt.datetime.fromtimestamp(ts[0]/1000,dt.timezone.utc).isoformat(),
+                  'end':dt.datetime.fromtimestamp(ts[-1]/1000,dt.timezone.utc).isoformat(),
+                  'gaps':gaps,'duplicates':duplicate_count,
+                  'sha256':hashlib.sha256(out.read_bytes()).hexdigest(),
+                  'sources':source_counts
+              }
+              print(sym, validation[sym])
+
+          meta={'venue':'Binance USD-M Futures','timeframe':'1m',
+                'start_date':str(start_day),'end_date':str(end_day),
+                'validation':validation}
+          Path('out/VALIDATION.json').write_text(json.dumps(meta,indent=2))
+          Path('out/READY').write_text(str(end_day))
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rex-daily-1m-tail
+          path: out/
+          if-no-files-found: error
+          retention-days: 7
