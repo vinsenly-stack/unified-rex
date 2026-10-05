@@ -114,3 +114,5 @@ jobs:
           path: out/
           if-no-files-found: error
           retention-days: 7
+
+# manual trigger: 2026-10-05 v026-d1
